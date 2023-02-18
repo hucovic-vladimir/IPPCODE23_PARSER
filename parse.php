@@ -1,11 +1,15 @@
 <?php
 
-// This class provides statistics about the parsed code
+// StatisticsCollector objects can generate various statistics from a list of instructions
 class StatisticsCollector{
+    public string $errorMessage;
+    public int $errorCode;
     public int $commentCount;
     public array $instructions;
 
+    // stores all defined labels
     private ?array $labels;
+    // stores all jump instructions and their order
     private ?array $jumps;
 
     // takes a Parser object as argument and uses its parsed instructions array and comment count
@@ -19,35 +23,35 @@ class StatisticsCollector{
     // get jump and label instructions and their order and store it in the $labels and $jumps arrays
     // this is here so that other instructions which use these arrays dont have to create these arrays
     // multiple times
-    private function GetLabelsAndJumps(){
+    private function GetLabelsAndJumps() : void{
         $instCount = count($this->instructions);
         $this->labels = array();
         $this->jumps = array();
 
         for($i = 0; $i < $instCount; $i++){
             if($this->instructions[$i]->opcode === "LABEL"){
-                $this->labels[$i] = $this->instructions[$i]->args[0];
+                $this->labels[$i] = $this->instructions[$i]->args[0]->value;
             }
 
             if($this->instructions[$i]->opcode === "JUMP" || $this->instructions[$i]->opcode === "JUMPIFEQ" ||
                 $this->instructions[$i]->opcode === "JUMPIFNEQ" || $this->instructions[$i]->opcode === "CALL"){
-                $this->jumps[$i] = $this->instructions[$i]->args[0];
+                $this->jumps[$i] = $this->instructions[$i]->args[0]->value;
             }
         }
     }
 
     // returns the number of comments in the code
-    public function GetCommentCount(){
+    public function GetCommentCount() : int{
         return $this->commentCount;
     }
 
     // returns the number of instructions in the code
-    public function GetInstructionCount(){
+    public function GetInstructionCount() : int{
         return count($this->instructions);
     }
 
     // returns the number of unique label definitions
-    public function GetLabelCount(){
+    public function GetLabelCount() : int{
         $labels = array();
         foreach($this->instructions as $inst){
             if($inst->opcode === "LABEL"){
@@ -77,6 +81,8 @@ class StatisticsCollector{
         }
         $opcodeCounts = array_values($opcodes);
         if(!$opcodeCounts) return array();
+        // get the maximum value from the $opcodes array and search all keys which have this value
+        // then add them to the array
         $max = max(array_values($opcodes));
         $maxOpcodes = array_keys($opcodes, $max);
         return $maxOpcodes;
@@ -98,8 +104,13 @@ class StatisticsCollector{
         if(!$this->labels || !$this->jumps) $this->GetLabelsAndJumps();
         $fwJumps = 0;
         foreach($this->jumps as $jumpOrder => $jumpLabel){
-            $labelOrder = array_search($jumpLabel, $this->labels);
-            if($labelOrder !== false && $labelOrder > $jumpOrder) $fwJumps++;
+            $jumpDestinations = array_keys($this->labels, $jumpLabel);
+            foreach($jumpDestinations as $jumpDest){
+                if($jumpOrder < $jumpDest){
+                    $fwJumps++;
+                    break;
+                }
+            }
         }
         return $fwJumps;
     }
@@ -109,13 +120,53 @@ class StatisticsCollector{
         if(!$this->labels || !$this->jumps) $this->GetLabelsAndJumps();
         $backJumps = 0;
         foreach($this->jumps as $jumpOrder => $jumpLabel){
-            $labelOrder = array_search($jumpLabel, $this->labels);
-            if($labelOrder !== false && $labelOrder < $jumpOrder) $backJumps++;
+            $jumpDestinations = array_keys($this->labels, $jumpLabel);
+            foreach($jumpDestinations as $jumpDest){
+                if($jumpOrder > $jumpDest){
+                    $backJumps++;
+                    break;
+                }
+            }
         }
         return $backJumps;
     }
-}
 
+    // Returns a string containing the statistics specified by the parameter
+    public function GetStatistics(array $requestedStatistics) : ?string{
+        $collectedStatisticsString = "";
+        foreach($requestedStatistics as $request){
+            switch($request){
+                case "loc": $collectedStatisticsString .= $this->GetInstructionCount() . "\n"; break;
+                case "comments": $collectedStatisticsString .= $this->GetCommentCount() . "\n"; break;
+                case "labels": $collectedStatisticsString .= $this->GetLabelCount() . "\n"; break;
+                case "jumps": $collectedStatisticsString .= 
+                                $this->GetOpcodesCount("jump", "jumpifeq", "jumpifneq", "call", "return") . "\n"; break;
+                case "fwjumps": $collectedStatisticsString .= $this->GetForwardJumpsCount() . "\n"; break;
+                case "backjumps": $collectedStatisticsString .= $this->GetBackwardJumpsCount() . "\n"; break;
+                case "badjumps": $collectedStatisticsString .= $this->GetBadJumpsCount(). "\n"; break;
+                case "eol": $collectedStatisticsString .= "\n"; break;
+                case "frequent":
+                    $mostFrequent = $this->GetMostFrequentOpcodes();
+                    for($i = 0; $i < count($mostFrequent); $i++){
+                        $collectedStatisticsString .=  $mostFrequent[$i];
+                        if($i + 1 != count($mostFrequent)) $collectedStatisticsString .= ",";
+                    }
+                    $collectedStatisticsString .= "\n"; break;
+                default:
+                    if(preg_match("/^print=/", $request)){
+                        $split = explode("=", $request, 2);
+                        $collectedStatisticsString .= $split[1];
+                    }
+                    else{
+                        $this->errorCode = 10;
+                        $this->errorMessage = "Unknown statistic: $request\n" . "Use --help for usage information\n";
+                        return null;
+                    }
+            } // switch($request)
+        } // foreach($requestedStatistics as $request)
+        return $collectedStatisticsString;
+    } // GetStatistics()
+} // class StatisticsCollector
 
 // Parser object takes care of checking the syntax of the input file and generating the XML representation.
 class Parser{
@@ -164,64 +215,24 @@ class Parser{
     public string $errorMessage = "";
     // stores the number of the current line being parsed for debugging purposes
     public int $currentLineNumber = 0;
-    // Contains all Instructions in the parsed program
+    // stores all Instruction objects in the parsed program
     public array $instructions = array();
     
     public int $commentCount = 0;
 
-    // private constructor
     public function __construct(){}
 
-    // returns the symbol type of $symb or unknown if it is an invalid symbol
-    private function IdentifySymbol(string $symb) : string {
-        if($this->IsValidVariable($symb)) return "var";
-        if($this->IsValidConstant($symb)) return "const";
-        else return "unknown";
-    }
-
-    // checks if $var is a valid ippcode23 variable
-    private function IsValidVariable(string $var){
-        $split = explode("@", $var, 2);
-        if(preg_match("/^[LGT]F$/", $split[0]) && preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $split[1])){
-            return true;
-        }
-        else return false;
-    }
-
-    // 
-    private function IsValidConstant(string $const){
-        // split constant into array with @ as the separator, if no @ is present constant is invalid
-        $split = explode("@", $const, 2);
-        if(count($split) < 2) return false;
-        $value = $split[1];
-        $type = $split[0];
-        switch($type){
-            case "int":
-                return preg_match("/^[+-]*(\d)+$/", $value);
-            case "bool":
-                return $split[1] == "true" || $split[1] == "false";
-            case "string":
-                // check if string doesnt contain invalid escape sequences
-                return checkEscapeSequences($value);
-            case "nil":
-                return $split[1] == "nil";
-            default:
-                return false;
-        } 
-    }
-
-    public function IsValidType(string $type){
-        return $type == "int" || $type == "bool" || $type == "string";        
-    }
-
-    public function IsValidLabel(string $label){
-        return preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $label);
-    }
-
-    
+    // parses the file specified by $filePath, checks the syntax and stores the parsed code
+    // as an array of Instruction objects
+    // returns true if parsing is successfull and false if it fails
     public function ParseFile(string $filePath) : bool{
         $head = false;
         $file = fopen($filePath, 'r');
+        if(!$file){
+            $this->errorMessage = "Unable to open file $filePath\n";
+            $this->errorCode = 11;
+            return false;
+        }
         // skips any empty or commented lines before the head
         while(($line = fgets($file))){
             $this->currentLineNumber++;
@@ -234,7 +245,7 @@ class Parser{
             }
             else{
                 if(strpos($trimmed, "#")) $this->commentCount++;
-                // first uncommented non-empty line must be head, otherwise return false with error 21
+                // check if the first non-empty non-commented line is head
                 if(preg_match("/^(\.ippcode23)(\s)*((#+.*)*)$/i",$trimmed)) $head = true;
                 break;
             }
@@ -265,8 +276,9 @@ class Parser{
             else array_push($this->instructions, $inst);
         }
         return true;
-    }
+    } // ParseFile()
 
+    // check instruction syntax and return and Instruction object, or null if parsing fails
     private function ParseInstruction(string $instruction) : ?Instruction{
         // split the line into array
         $lineSplit = preg_split("/(\s)+/", $instruction);
@@ -306,22 +318,8 @@ class Parser{
             // create Argument objects
             for($i = 0; $i < $argCount; $i++){
                 $argObject = null;
-                switch($syntax[$i]){
-                    case "symb" : $argObject = Argument::Create($this->IdentifySymbol($args[$i]), $args[$i]);
-                    break;
-                    case "label":
-                        if($this->IsValidLabel($args[$i])) $argObject = Argument::Create("label", $args[$i]);
-                    break;
-                    case "var": 
-                        if($this->IsValidVariable($args[$i])) $argObject = Argument::Create("var", $args[$i]);
-                    break;
-                    case "const": 
-                        if($this->IsValidConstant($args[$i])) $argObject = Argument::Create("const", $args[$i]);
-                    case "type":
-                        if($this->IsValidType($args[$i])) $argObject = Argument::Create("type", $args[$i]);    
-                    break;
-                }
-
+                $argType = $syntax[$i];
+                $argObject = ArgumentFactory::CreateArgument($argType, $args[$i]);
                 if($argObject === null){
                     $this->errorCode = 23;
                     $this->errorMessage = "Wrong type of argument number " . $i+1 . " on line $this->currentLineNumber\n";
@@ -329,10 +327,11 @@ class Parser{
                 }
                 else array_push($argObjectsArray, $argObject);
             }
-        }
+        } 
         return new Instruction($opcode, $argObjectsArray);
-    }
+    } // ParseInstruction()
 
+    // Returns the XML representation of the instructions
     public function GenerateOutput() : string{
         $output = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
         $output .= "<program language=\"IPPcode23\">\n";
@@ -344,14 +343,34 @@ class Parser{
         $output .= "</program>\n";
 
         return $output;
-        
     }
-}
+} // class Parser
 
 // Parent class of IPPcode23 instructions and arguments
 abstract class CodeElement{
     // returns a string containing the XML representation of the concrete element
     public abstract function toXML() : string;
+}
+
+// Factory class that creates different subclasses of Argument
+class ArgumentFactory{
+    // Try to create an Argument of the specified $type
+    public static function CreateArgument(string $type, string $value) : ?Argument{
+        switch($type){
+            case "symb":
+                return Symbol::Create($value);
+            case "var":
+                return Variable::Create($value);
+            case "const":
+                return Constant::Create($value);
+            case "label":
+                return Label::Create($value);
+            case "type":
+                return Type::Create($value);
+            default: 
+                return null;               
+        }
+    }   
 }
 
 // Class representing IPPcode23 instructions
@@ -385,34 +404,34 @@ abstract class Argument extends CodeElement{
     public $value;
 
     // Factory method for creating objects derived from Argument
-    public static function Create(string $type, string $value) : ?Argument{
-        switch($type){
-            case "var":
-                return new Variable($value);
-            case "const":
-                return new Constant($value);
-            case "label":
-                return new Label($value);
-            case "type":
-                return new Type($value);
-            default: 
-                return null;               
-        }
-    }
+    protected abstract static function Create(string $value) : ?Argument ;
+
+    // Abstract method for checking the validity of arguments
+    protected abstract static function IsValid(string $value) : bool;
 
     protected function __construct($value){
         $this->value = $value;
-    }    
+    }
 }
 
 // Abstract class derived from Argument, base class for all types of symbols
 abstract class Symbol extends Argument{
     // $type represents the first part of the symbol before "@"
     public string $type;
-    protected function __construct($symbol){
+    public function __construct($symbol){
         $split = explode("@", $symbol, 2);
         $this->type = $split[0];
         $this->value = $split[1];
+    }
+
+    public static function Create(string $symb) : ?Symbol{
+        $symbObject = Variable::Create($symb);
+        if($symbObject === null) $symbObject = Constant::Create($symb);
+        return $symbObject;
+    }
+
+    protected static function IsValid(string $symb) : bool{
+        return Variable::IsValid($symb) || Constant::IsValid($symb);
     }
 }
 
@@ -423,30 +442,79 @@ class Variable extends Symbol{
                     "$this->type@" . htmlspecialchars($this->value, ENT_XML1, 'UTF-8') . 
                 "</arg$argNum>";
     }
+
+    public static function Create(string $var) : ?Variable{
+        if(self::IsValid($var)) return new Variable($var);
+        else return null;
+    }
+
+    // checks if $var is a valid variable
+    protected static function IsValid(string $var) : bool{
+        $split = explode("@", $var, 2);
+        return preg_match("/^[LGT]F$/", $split[0])
+               && preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $split[1]);
+    }
 }
 
 // Class representing IPPcode23 constants
 class Constant extends Symbol{
+    public static function Create(string $const) : ?Constant{
+        if(self::IsValid($const)) return new Constant($const);
+        else return null;
+    }
+
     public function toXML($argNum = 0) : string{
         return "\t\t<arg$argNum type=\"$this->type\">" . 
                     htmlspecialchars($this->value, ENT_XML1, 'UTF-8') . 
                 "</arg$argNum>";
     }
-}
+
+    // check if $const is a valid constant
+    protected static function IsValid(string $const) : bool{
+        // split constant into array with @ as the separator, if no @ is present constant is invalid
+        $split = explode("@", $const, 2);
+        if(count($split) < 2) return false;
+        $value = $split[1];
+        $type = $split[0];
+        switch($type){
+            case "int":
+                return preg_match("/^[+-]*(\d)+$/", $value);
+            case "bool":
+                return $split[1] === "true" || $split[1] === "false";
+            case "string":
+                // check if string doesnt contain invalid escape sequences
+                return preg_match("/^([^\\\\]|\\\\\d{3})*$/", $split[1]);
+            case "nil":
+                return $split[1] === "nil";
+            default:
+                return false;
+        } 
+    }   
+} // class Constant
 
 // Class representing IPPcode23 labels
 class Label extends Argument{
+    public static function Create($label) : ?Label{
+       if(Label::isValid($label)) return new Label($label);
+       else return null;
+    }
+
     public static function isValid(string $label) : bool{
         return preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $label);
     }
 
     public function toXML($argNum = 0) : string{
         return "\t\t<arg$argNum type=\"label\">" . htmlspecialchars($this->value, ENT_XML1, 'UTF-8'). "</arg$argNum>";
-    }
+    } 
 }
 
 // Class representing IPPcode23 types
 class Type extends Argument{
+    public static function Create($type) : ?Type{
+        if(Type::isValid($type)) return new Type($type);
+        else return null;
+     }
+
     public static function isValid(string $type) : bool{
         return $type == "int" || $type == "bool" || $type == "string";        
     }
@@ -455,26 +523,6 @@ class Type extends Argument{
         return "\t\t<arg$argNum type=\"type\">$this->value</arg$argNum>";
     }
 }
-
-// checks if escape sequences in $string are valid
-// if there are no escape sequences or they are all valid, return true
-// if there is an invalid escape sequence, return false
-function checkEscapeSequences($string){
-    $valid = true;
-    $len = strlen($string);
-
-    for($i = 0; $i < $len; $i++){
-        if($string[$i] === "\\"){
-            if($i+3 >= $len) return false;
-            for($j = 1; $j < 4; $j++){
-                if(!is_numeric($string[$i+$j])) return false;
-            }
-        }
-    }
-    return true;
-}
-
-
 
 $parser = new Parser();
 
@@ -487,7 +535,6 @@ else{
 }
 
 $statsCollector = new StatisticsCollector($parser);
-$statsCollector->instructions = $parser->instructions;
 $requestedStatistics = array();
 
 
@@ -537,48 +584,18 @@ for($i = 1; $i < $argc; $i++){
     }
 }
 
-function writeStatistics(array $requestedStatistics, StatisticsCollector $statsCollector){
-    foreach($requestedStatistics as $fileName => $requests){
-        $file = fopen($fileName, "w");
-        if(!$file) {
-            fwrite(STDERR, "File $fileName cannot be opened/created!\n");
-            exit(12);
-        }
-        foreach($requests as $request){
-            switch($request){
-                case "loc": fwrite($file, $statsCollector->GetInstructionCount() . "\n"); break;
-                case "comments": fwrite($file, $statsCollector->GetCommentCount() . "\n"); break;
-                case "labels": fwrite($file, $statsCollector->GetLabelCount() . "\n"); break;
-                case "jumps": fwrite($file, $statsCollector->GetOpcodesCount("jump", "jumpifeq", "jumpifneq", "call", "return") 
-                                . "\n"); break;
-                case "fwjumps": fwrite($file, $statsCollector->GetForwardJumpsCount() . "\n"); break;
-                case "backjumps": fwrite($file, $statsCollector->GetBackwardJumpsCount() . "\n"); break;
-                case "badjumps": fwrite($file, $statsCollector->GetBadJumpsCount(). "\n"); break;
-                case "eol": fwrite($file, "\n"); break;
-                case "frequent": 
-                    $mostFrequent = $statsCollector->GetMostFrequentOpcodes();
-                    for($i = 0; $i < count($mostFrequent); $i++){
-                        fwrite($file, $mostFrequent[$i]);
-                        if($i + 1 != count($mostFrequent)) fwrite($file, ",");
-                    }
-                    fwrite($file, "\n");
-                    break;
-                default:
-                    if(preg_match("/^print=/", $request)){
-                        $split = explode("=", $request, 2);
-                        fwrite($file, $split[1]);
-                    }
-                    else{
-                        fwrite(STDERR, "Unknown statistic: $request\n" . "Use --help for usage\n");
-                    }
-            }
-        }
-    }
-}
-
 // MAIN
 ini_set('display_errors', 'stderr');
-
-writeStatistics($requestedStatistics, $statsCollector);
+foreach($requestedStatistics as $fileName => $statistics){
+    $file = fopen($fileName, "w");
+    $statisticsString = $statsCollector->GetStatistics($statistics);
+    if($statisticsString === null){
+        fwrite(STDERR, $statsCollector->errorMessage);
+        exit($statsCollector->errorCode);
+    }
+    else{
+        fwrite($file, $statisticsString);
+    }
+}
 
 ?>
