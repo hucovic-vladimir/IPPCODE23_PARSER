@@ -1,5 +1,4 @@
 <?php
-
 // StatisticsCollector objects can generate various statistics from a list of instructions
 class StatisticsCollector{
     public string $errorMessage;
@@ -62,7 +61,7 @@ class StatisticsCollector{
     }
 
     // returns the number of occurences of all $opcodes (aggregated)
-    public function GetOpcodesCount(string ...$opcodes){
+    public function GetOpcodesCount(string ...$opcodes) : int{
         $count = 0;
         foreach($this->instructions as $inst){
             foreach($opcodes as $opcode){
@@ -171,7 +170,7 @@ class StatisticsCollector{
 // Parser object takes care of checking the syntax of the input file and generating the XML representation.
 class Parser{
     // constant containing the correct syntax for IPPcode23 instructions
-    public const INSTRUCTIONS = array(
+    private const SYNTAX = array(
         "MOVE" => array("var", "symb"),
         "CREATEFRAME" => array(),
         "PUSHFRAME" => array(),
@@ -280,6 +279,7 @@ class Parser{
 
     // check instruction syntax and return and Instruction object, or null if parsing fails
     private function ParseInstruction(string $instruction) : ?Instruction{
+        static $instOrder = 1;
         // split the line into array
         $lineSplit = preg_split("/(\s)+/", $instruction);
 
@@ -290,7 +290,7 @@ class Parser{
 
         $opcode = strtoupper($lineSplit[0]);
         // check if instruction exists and get its correct syntax
-        $syntax = self::INSTRUCTIONS[strtoupper($lineSplit[0])] ?? false;
+        $syntax = self::SYNTAX[strtoupper($lineSplit[0])] ?? false;
         if($syntax === false){
             $this->errorCode = 22;
             $this->errorMessage = "Invalid opcode on line $this->currentLineNumber\n";
@@ -328,7 +328,7 @@ class Parser{
                 else array_push($argObjectsArray, $argObject);
             }
         } 
-        return new Instruction($opcode, $argObjectsArray);
+        return new Instruction($opcode, $argObjectsArray, $instOrder++);
     } // ParseInstruction()
 
     // Returns the XML representation of the instructions
@@ -375,21 +375,23 @@ class ArgumentFactory{
 
 // Class representing IPPcode23 instructions
 class Instruction extends CodeElement{
-    public static int $instCount = 1;
     public string $opcode;
     public array $args; // array of objects of type Argument
     public int $order;
 
-    public function __construct(string $opcode, $args){
+    public function __construct(string $opcode, array $args, int $order){
         $this->opcode = $opcode;
         $this->args = $args;
-        $this->order = Instruction::$instCount++;
+        $this->order = $order;
     }
 
     public function toXML() : string{
         // iterate through the arguments and get their XML
         $argXML = "\n";
         $argCount = count($this->args);
+        if($argCount === 0){
+            return "\t<instruction opcode=\"$this->opcode\" order=\"$this->order\"/>\n";
+        }
         for($i = 1; $i <= $argCount; $i++){
             $argXML .= $this->args[$i-1]->toXML($i);
             $argXML .= "\n";
@@ -404,32 +406,24 @@ abstract class Argument extends CodeElement{
     public $value;
 
     // Factory method for creating objects derived from Argument
-    protected abstract static function Create(string $value) : ?Argument ;
+    public abstract static function Create(string $value) : ?Argument ;
 
     // Abstract method for checking the validity of arguments
     protected abstract static function IsValid(string $value) : bool;
 
-    protected function __construct($value){
+    protected function __construct(string $value){
         $this->value = $value;
     }
 }
 
 // Abstract class derived from Argument, base class for all types of symbols
 abstract class Symbol extends Argument{
-    // $type represents the first part of the symbol before "@"
-    public string $type;
-    public function __construct($symbol){
-        $split = explode("@", $symbol, 2);
-        $this->type = $split[0];
-        $this->value = $split[1];
-    }
-
     public static function Create(string $symb) : ?Symbol{
         $symbObject = Variable::Create($symb);
         if($symbObject === null) $symbObject = Constant::Create($symb);
         return $symbObject;
     }
-
+    
     protected static function IsValid(string $symb) : bool{
         return Variable::IsValid($symb) || Constant::IsValid($symb);
     }
@@ -437,9 +431,17 @@ abstract class Symbol extends Argument{
 
 // Class representing IPPcode23 variables
 class Variable extends Symbol{
-    public function toXML($argNum = 0) : string{
+    public string $frame;
+
+    private function __construct(string $var){
+        $split = explode("@", $var, 2);
+        $this->frame = $split[0];
+        $this->value = $split[1];
+    }
+
+    public function toXML(int $argNum = 0) : string{
         return "\t\t<arg$argNum type=\"var\">" .
-                    "$this->type@" . htmlspecialchars($this->value, ENT_XML1, 'UTF-8') . 
+                    "$this->frame@" . htmlspecialchars($this->value, ENT_XML1, 'UTF-8') . 
                 "</arg$argNum>";
     }
 
@@ -451,20 +453,28 @@ class Variable extends Symbol{
     // checks if $var is a valid variable
     protected static function IsValid(string $var) : bool{
         $split = explode("@", $var, 2);
-        return preg_match("/^[LGT]F$/", $split[0])
-               && preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $split[1]);
+        return (bool) preg_match("/^[LGT]F$/", $split[0])
+               && (bool) preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $split[1]);
     }
 }
 
 // Class representing IPPcode23 constants
 class Constant extends Symbol{
+    public string $dataType;
+
+    private function __construct(string $const){
+        $split = explode("@", $const, 2);
+        $this->dataType = $split[0];
+        $this->value = $split[1];
+    }
+
     public static function Create(string $const) : ?Constant{
         if(self::IsValid($const)) return new Constant($const);
         else return null;
     }
 
     public function toXML($argNum = 0) : string{
-        return "\t\t<arg$argNum type=\"$this->type\">" . 
+        return "\t\t<arg$argNum type=\"$this->dataType\">" . 
                     htmlspecialchars($this->value, ENT_XML1, 'UTF-8') . 
                 "</arg$argNum>";
     }
@@ -478,12 +488,12 @@ class Constant extends Symbol{
         $type = $split[0];
         switch($type){
             case "int":
-                return preg_match("/^[+-]*(\d)+$/", $value);
+                return (bool) preg_match("/^[+-]*(\d)+$/", $value);
             case "bool":
                 return $split[1] === "true" || $split[1] === "false";
             case "string":
                 // check if string doesnt contain invalid escape sequences
-                return preg_match("/^([^\\\\]|\\\\\d{3})*$/", $split[1]);
+                return (bool) preg_match("/^([^\\\\]|\\\\\d{3})*$/", $split[1]);
             case "nil":
                 return $split[1] === "nil";
             default:
@@ -500,7 +510,7 @@ class Label extends Argument{
     }
 
     public static function isValid(string $label) : bool{
-        return preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $label);
+        return (bool) preg_match("/^[(a-z)_\-\$&%\*!?][(a-z)(0-9)_\-\$&%\*!?]*$/i", $label);
     }
 
     public function toXML($argNum = 0) : string{
@@ -524,6 +534,8 @@ class Type extends Argument{
     }
 }
 
+
+ini_set('display_errors', 'stderr');
 $parser = new Parser();
 
 if($parser->ParseFile('php://stdin')){
@@ -585,7 +597,6 @@ for($i = 1; $i < $argc; $i++){
 }
 
 // MAIN
-ini_set('display_errors', 'stderr');
 foreach($requestedStatistics as $fileName => $statistics){
     $file = fopen($fileName, "w");
     $statisticsString = $statsCollector->GetStatistics($statistics);
